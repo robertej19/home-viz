@@ -144,19 +144,66 @@ def _unique_products_with_slugs(df: pd.DataFrame) -> list[dict]:
     return [{"name": n, "slug": image_cache.slugify(n)} for n in names if image_cache.slugify(n)]
 
 
+def _products_by_type(df: pd.DataFrame) -> list[dict]:
+    """Products grouped by (normalized) type; each group has type name and list of {slug, name}."""
+    if df.empty or "Product" not in df.columns or "Type" not in df.columns:
+        return []
+    type_col = "Type"
+    df = df.dropna(subset=["Product", type_col])
+    df = df.drop_duplicates(subset=["Product"])
+    df = df.copy()
+    df["Type_norm"] = df[type_col].astype(str).str.strip().apply(normalize_type)
+    df = df[df["Type_norm"] != ""]
+    df["slug"] = df["Product"].astype(str).str.strip().apply(image_cache.slugify)
+    df = df[df["slug"] != ""]
+    names = df["Product"].astype(str).str.strip().unique().tolist()
+    image_cache.ensure_manifest(names)
+
+    def _str(val):
+        if pd.isna(val) or val == "":
+            return ""
+        return str(val).strip()
+
+    def to_products(g):
+        return [
+            {
+                "slug": r["slug"],
+                "name": r["Product"],
+                "open_date": _str(r.get("Open Date", "")),
+                "price": _str(r.get("Price", "")),
+                "comments": _str(r.get("Comments", "")),
+            }
+            for _, r in g.iterrows()
+        ]
+
+    def col_row_span(n: int) -> tuple[int, int]:
+        """Grid span (col_span, row_span) so section size reflects product count. Puzzle-like."""
+        if n <= 0:
+            return (1, 1)
+        col_span = min(n, 3)
+        row_span = max(1, (n + col_span - 1) // col_span)
+        return (col_span, row_span)
+
+    groups = df.groupby("Type_norm", sort=True).apply(to_products).to_dict()
+    out = []
+    for t in groups:
+        products = groups[t]
+        c, r = col_row_span(len(products))
+        out.append({"type": t, "products": products, "col_span": c, "row_span": r})
+    return out
+
+
 @app.route("/")
 def index():
     """Serve the main page with summary data."""
     df = load_data()
     summary = get_summary(df)
-    pie_html = build_pie_chart_html(summary.get("type_list", [])) if not df.empty else ""
-    unique_products = _unique_products_with_slugs(df)
+    products_by_type = _products_by_type(df)
     return render_template_string(
         INDEX_HTML,
         summary=summary,
         has_data=not df.empty,
-        pie_html=pie_html,
-        unique_products=unique_products,
+        products_by_type=products_by_type,
     )
 
 
@@ -175,7 +222,11 @@ def product_image(slug: str):
         return "", 404
     ext = path.suffix.lower()
     mimetype = "image/webp" if ext == ".webp" else "image/jpeg" if ext in (".jpg", ".jpeg") else "image/png"
-    return send_file(path, mimetype=mimetype, max_age=86400 * 7)
+    resp = send_file(path, mimetype=mimetype)
+    # Avoid long-lived cache so updated/replaced images show on phones
+    resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
 
 
 @app.route("/api/data")
@@ -194,120 +245,127 @@ INDEX_HTML = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <meta name="theme-color" content="#1a1b2e">
-    <title>Skin Care Tracking</title>
+    <title>Skin Care Console</title>
     <style>
         *, *::before, *::after { box-sizing: border-box; }
         html {
             -webkit-text-size-adjust: 100%;
-            min-height: 100%;
+            height: 100%;
+            max-height: 100dvh;
+            overflow: hidden;
         }
         body {
             font-family: "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
             margin: 0;
-            min-height: 100vh;
-            min-height: 100dvh;
-            padding: max(1.25rem, env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right)) max(1.25rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left));
+            height: 100%;
+            max-height: 100dvh;
+            overflow: hidden;
+            padding: max(0.75rem, env(safe-area-inset-top)) max(0.75rem, env(safe-area-inset-right)) max(0.75rem, env(safe-area-inset-bottom)) max(0.75rem, env(safe-area-inset-left));
             background: linear-gradient(165deg, #1a1b2e 0%, #16213e 40%, #0f3460 100%);
             color: #e8e8e8;
-            font-size: clamp(1rem, 2.5vw, 1.0625rem);
+            font-size: clamp(0.9rem, 2.5vw, 1rem);
         }
         .page {
+            display: flex;
+            flex-direction: column;
             max-width: 28rem;
             margin: 0 auto;
+            height: 100%;
+            max-height: 100%;
+            min-height: 0;
         }
         h1 {
-            font-size: clamp(1.5rem, 5vw, 1.75rem);
+            flex-shrink: 0;
+            font-size: clamp(1.25rem, 4vw, 1.5rem);
             font-weight: 700;
-            margin: 0 0 1.25rem;
+            margin: 0 0 0.5rem;
             letter-spacing: -0.02em;
             text-align: center;
         }
-        .pie-wrap {
-            background: rgba(255, 255, 255, 0.06);
-            backdrop-filter: blur(12px);
-            -webkit-backdrop-filter: blur(12px);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 1.25rem;
-            padding: 0.5rem;
-            margin-bottom: 1.5rem;
-            overflow: hidden;
+        .dashboard-scroll {
+            flex: 1;
+            min-height: 0;
+            overflow-y: auto;
+            -webkit-overflow-scrolling: touch;
         }
-        .pie-wrap .js-plotly-plot {
-            width: 100% !important;
-            max-width: 320px;
-            margin: 0 auto;
-        }
-        .summary {
+        .products-grid {
             display: grid;
             grid-template-columns: repeat(3, 1fr);
-            gap: 0.75rem;
-            margin-bottom: 1.5rem;
+            grid-auto-rows: 88px;
+            grid-auto-flow: dense;
+            gap: 0.35rem;
+            padding-bottom: 0.5rem;
+        }
+        .products-grid .type-block {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            border-radius: 0.5rem;
+            padding: 0.3rem 0.4rem;
+            border-left: 3px solid;
+            min-height: 0;
+            overflow: hidden;
+        }
+        .products-grid .type-label {
+            font-size: 0.58rem;
+            font-weight: 700;
+            color: #fff;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 0.2rem;
+            flex-shrink: 0;
+        }
+        .products-grid .type-products {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.25rem;
+            justify-content: center;
+            align-content: flex-start;
+            flex: 1;
+            min-height: 0;
+        }
+        .products-grid .product-cell {
+            display: inline-flex;
+            flex-shrink: 0;
+            cursor: pointer;
+        }
+        .products-grid .product-cell img {
+            width: 64px;
+            height: 64px;
+            object-fit: cover;
+            border-radius: 6px;
+            background: rgba(0, 0, 0, 0.25);
+            flex-shrink: 0;
+        }
+        .summary {
+            flex-shrink: 0;
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 0.5rem;
+            padding-top: 0.5rem;
         }
         .card {
             background: rgba(255, 255, 255, 0.08);
             backdrop-filter: blur(12px);
             -webkit-backdrop-filter: blur(12px);
             border: 1px solid rgba(255, 255, 255, 0.12);
-            border-radius: 1rem;
-            padding: 1rem 0.75rem;
+            border-radius: 0.75rem;
+            padding: 0.6rem 0.5rem;
             text-align: center;
             -webkit-tap-highlight-color: transparent;
         }
         .card h3 {
-            margin: 0 0 0.35rem;
-            font-size: 0.7rem;
+            margin: 0 0 0.2rem;
+            font-size: 0.6rem;
             font-weight: 600;
             text-transform: uppercase;
             letter-spacing: 0.06em;
             color: rgba(255, 255, 255, 0.6);
         }
         .card .value {
-            font-size: clamp(1.25rem, 4vw, 1.5rem);
+            font-size: clamp(1.1rem, 3.5vw, 1.35rem);
             font-weight: 700;
             color: #fff;
-        }
-        .products-wrap {
-            background: rgba(255, 255, 255, 0.06);
-            backdrop-filter: blur(12px);
-            -webkit-backdrop-filter: blur(12px);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 1.25rem;
-            padding: 1rem;
-            margin-bottom: 1rem;
-        }
-        .products-wrap h2 {
-            font-size: 0.9rem;
-            font-weight: 600;
-            margin: 0 0 0.75rem;
-            color: rgba(255, 255, 255, 0.85);
-        }
-        .product-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
-            gap: 0.75rem;
-        }
-        .product-card {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            gap: 0.35rem;
-        }
-        .product-card img {
-            width: 64px;
-            height: 64px;
-            object-fit: cover;
-            border-radius: 12px;
-            background: rgba(0, 0, 0, 0.3);
-        }
-        .product-card .name {
-            font-size: 0.7rem;
-            color: rgba(255, 255, 255, 0.8);
-            text-align: center;
-            line-height: 1.2;
-            display: -webkit-box;
-            -webkit-line-clamp: 2;
-            -webkit-box-orient: vertical;
-            overflow: hidden;
         }
         .empty {
             background: rgba(255, 255, 255, 0.06);
@@ -319,14 +377,99 @@ INDEX_HTML = """
             color: rgba(255, 255, 255, 0.55);
         }
         .empty code { font-size: 0.9em; opacity: 0.9; }
+        .product-modal-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: transparent;
+            z-index: 100;
+            align-items: center;
+            justify-content: center;
+            padding: 1rem;
+            pointer-events: none;
+        }
+        .product-modal-overlay.is-open { display: flex; pointer-events: auto; }
+        .product-modal-overlay.is-open .product-modal { pointer-events: auto; }
+        .product-modal {
+            background: rgba(26, 27, 46, 0.98);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 1rem;
+            padding: 1.25rem;
+            max-width: 22rem;
+            width: 100%;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+        }
+        .product-modal-img {
+            width: 140px;
+            height: 140px;
+            object-fit: cover;
+            border-radius: 10px;
+            background: rgba(0, 0, 0, 0.3);
+            display: block;
+            margin: 0 auto 1rem;
+        }
+        .product-modal h3 {
+            margin: 0 0 0.5rem;
+            font-size: 1rem;
+            color: #fff;
+        }
+        .product-modal .product-type {
+            font-size: 0.75rem;
+            color: rgba(255, 255, 255, 0.6);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 0.75rem;
+        }
+        .product-modal-details {
+            font-size: 0.85rem;
+            color: rgba(255, 255, 255, 0.9);
+        }
+        .product-modal-details dt {
+            font-weight: 600;
+            color: rgba(255, 255, 255, 0.6);
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            margin-top: 0.5rem;
+        }
+        .product-modal-details dt:first-of-type { margin-top: 0; }
+        .product-modal-details dd {
+            margin: 0.2rem 0 0;
+        }
+        .product-modal-close {
+            margin-top: 1rem;
+            padding: 0.4rem 0.75rem;
+            font-size: 0.8rem;
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 0.5rem;
+            color: #e8e8e8;
+            cursor: pointer;
+        }
     </style>
 </head>
 <body>
     <div class="page">
-        <h1>Skin Care Tracking</h1>
+        <h1>SkinCare Rotation</h1>
         {% if has_data %}
-        <div class="pie-wrap">
-            {{ pie_html | safe }}
+        <div class="dashboard-scroll">
+        {% if products_by_type %}
+        {% set type_colors = ['#00fff5', '#ff00aa', '#7b2fff', '#00ff88', '#ff3366', '#00ccff', '#ffcc00', '#bf00ff', '#39ff14'] %}
+        <section class="products-grid">
+            {% for row in products_by_type %}
+            <div class="type-block" style="background: {{ type_colors[loop.index0 % type_colors|length] }}18; border-left-color: {{ type_colors[loop.index0 % type_colors|length] }}; grid-column: span {{ row.col_span }}; grid-row: span {{ row.row_span }};">
+                <div class="type-label">{{ row.type }}</div>
+                <div class="type-products">
+                    {% for p in row.products %}
+                    <div class="product-cell" data-name="{{ p.name }}" data-type="{{ row.type }}" data-slug="{{ p.slug }}" data-open-date="{{ p.open_date }}" data-price="{{ p.price }}" data-comments="{{ p.comments }}" role="button" tabindex="0">
+                        <img src="/api/product_image/{{ p.slug }}" alt="" loading="lazy" onerror="this.onerror=null; this.style.background='rgba(255,255,255,0.08)'; this.style.minWidth='64px'; this.style.minHeight='64px';">
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endfor %}
+        </section>
+        {% endif %}
         </div>
         <div class="summary">
             <div class="card">
@@ -342,23 +485,57 @@ INDEX_HTML = """
                 <div class="value">{{ summary.active_in_rotation }}</div>
             </div>
         </div>
-        {% if unique_products %}
-        <section class="products-wrap">
-            <h2>Products</h2>
-            <div class="product-grid">
-                {% for p in unique_products %}
-                <div class="product-card" title="{{ p.name }}">
-                    <img src="/api/product_image/{{ p.slug }}" alt="{{ p.name }}" loading="lazy" onerror="this.onerror=null; this.style.background='rgba(255,255,255,0.08)'; this.style.minWidth='64px'; this.style.minHeight='64px';">
-                    <span class="name">{{ p.name }}</span>
-                </div>
-                {% endfor %}
-            </div>
-        </section>
-        {% endif %}
         {% else %}
         <p class="empty">No data loaded. Run <code>python download_data.py</code> and ensure <code>data/sheet_data.csv</code> exists.</p>
         {% endif %}
     </div>
+    <div class="product-modal-overlay" id="productModal" aria-hidden="true">
+        <div class="product-modal" onclick="event.stopPropagation()">
+            <img class="product-modal-img" id="productModalImg" src="" alt="">
+            <h3 id="productModalName"></h3>
+            <div class="product-type" id="productModalType"></div>
+            <dl class="product-modal-details">
+                <dt>Open Date</dt>
+                <dd id="productModalOpenDate">—</dd>
+                <dt>Price</dt>
+                <dd id="productModalPrice">—</dd>
+                <dt>Comments</dt>
+                <dd id="productModalComments">—</dd>
+            </dl>
+            <button type="button" class="product-modal-close" id="productModalClose">Close</button>
+        </div>
+    </div>
+    <script>
+        (function() {
+            var overlay = document.getElementById('productModal');
+            var nameEl = document.getElementById('productModalName');
+            var typeEl = document.getElementById('productModalType');
+            var imgEl = document.getElementById('productModalImg');
+            var openDateEl = document.getElementById('productModalOpenDate');
+            var priceEl = document.getElementById('productModalPrice');
+            var commentsEl = document.getElementById('productModalComments');
+            function setText(el, val) { el.textContent = (val && val !== '') ? val : '—'; }
+            document.querySelectorAll('.product-cell').forEach(function(cell) {
+                cell.addEventListener('click', function() {
+                    var slug = this.getAttribute('data-slug') || '';
+                    nameEl.textContent = this.getAttribute('data-name') || '';
+                    typeEl.textContent = this.getAttribute('data-type') || '';
+                    imgEl.src = slug ? '/api/product_image/' + slug : '';
+                    setText(openDateEl, this.getAttribute('data-open-date'));
+                    setText(priceEl, this.getAttribute('data-price'));
+                    setText(commentsEl, this.getAttribute('data-comments'));
+                    overlay.classList.add('is-open');
+                    overlay.setAttribute('aria-hidden', 'false');
+                });
+            });
+            function closeModal() {
+                overlay.classList.remove('is-open');
+                overlay.setAttribute('aria-hidden', 'true');
+            }
+            document.getElementById('productModalClose').addEventListener('click', closeModal);
+            overlay.addEventListener('click', closeModal);
+        })();
+    </script>
 </body>
 </html>
 """
