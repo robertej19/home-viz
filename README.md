@@ -34,3 +34,18 @@ python app.py
 Open http://127.0.0.1:5000 for the summary dashboard. API endpoints:
 - `GET /api/summary` — JSON summary stats
 - `GET /api/data` — raw product data (for visualizations)
+- `GET /api/product_image/<slug>` — product image (fetched and cached on first request)
+
+## Product images
+
+**To populate images**, run once (after `data/sheet_data.csv` exists):
+
+```bash
+pip install playwright && playwright install chromium
+python download_product_images.py
+```
+
+This uses Playwright (headless Chromium) to search Bing Images for each product name, downloads the first usable result, crops to a square, resizes to 256×256, and saves under `data/product_images/`. Already-cached files are skipped.
+
+- **Manual override:** Put a file in `data/product_images/` with the slug as the name (e.g. `anua-3-cream.jpg`). Slugs are in `data/product_images/manifest.json`.
+- The app serves images from that cache; if a file is missing it tries to fetch on first request (can be slow or 404 if fetch fails). Pre-running the script avoids that.
